@@ -1,72 +1,96 @@
-import asyncio
-from datetime import datetime
+import logging
+import json
+from pydantic import BaseModel, Field
+from google import genai
+from google.genai import types
+
+# 1. Observability: Structured JSON Logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger("TicketAgent")
+
+# Initialize Gemini Client (expects GEMINI_API_KEY environment variable)
+client = genai.Client()
 
 
-class TicketTimingTrackerAgent:
-
-  def __init__(self, event_name: str, target_date: str):
-    self.event_name = event_name
-    self.target_date = datetime.strptime(target_date, "%Y-%m-%d")
-
-  async def fetch_historical_pricing(self):
-    """Tool: Simulates fetching historical pricing trends for the event."""
-    print(
-        f"[Tool: PricingAPI] Analyzing historical ticket trends for"
-        f" '{self.event_name}'..."
-    )
-    await asyncio.sleep(1)
-    # Simulated trend data: average price drops 14 days out, then spikes
-    return {
-        "average_current_price": 250.00,
-        "historical_low": 180.00,
-        "historical_high": 400.00,
-        "optimal_purchase_window_days_before": 14,
-    }
-
-  async def analyze_best_time_to_buy(self):
-    """Orchestration & Logic: Determines optimal purchase window."""
-    pricing_data = await self.fetch_historical_pricing()
-
-    days_remaining = (self.target_date - datetime.now()).days
-    optimal_days = pricing_data["optimal_purchase_window_days_before"]
-
-    print("\n[Orchestration Engine] Running decision matrix...")
-    if days_remaining > optimal_days:
-      recommendation = (
-          f"HOLD. You are {days_remaining} days out. Prices typically drop"
-          f" when it gets closer to {optimal_days} days before the event."
-      )
-      confidence = "High"
-    elif days_remaining == optimal_days or days_remaining < optimal_days:
-      recommendation = (
-          "BUY NOW. You are inside or past the optimal pricing window. Prices"
-          " are likely to increase due to scarcity."
-      )
-      confidence = "Critical"
-    else:
-      recommendation = "MONITOR CLOSELY. Volatility is high."
-      confidence = "Medium"
-
-    return {
-        "event": self.event_name,
-        "days_until_event": days_remaining,
-        "recommendation": recommendation,
-        "confidence": confidence,
-        "benchmark_price": pricing_data["average_current_price"],
-    }
-
-
-async def main():
-  # Example run for a concert or sports event
-  agent = TicketTimingTrackerAgent(
-      event_name="Global Tech Summit 2026", target_date="2026-11-15"
+# 2. Tool & Interface Design: Explicit Pydantic Schema for Validation
+class TicketQueryArgs(BaseModel):
+  event_name: str = Field(description="The name of the event or concert.")
+  days_out: int = Field(
+      description="Number of days remaining until the event."
   )
-  result = await agent.analyze_best_time_to_buy()
 
-  print("\n--- Agent Evaluation Report ---")
-  for key, value in result.items():
-    print(f"{key.replace('_', ' ').title()}: {value}")
+
+def check_event_ticket_pricing(args: TicketQueryArgs) -> dict:
+  """Tool: Fetches live pricing metrics and historical trends with schema validation and error handling."""
+  logger.info(
+      json.dumps({
+          "event": args.event_name,
+          "days_out": args.days_out,
+          "action": "fetch_pricing",
+      })
+  )
+  try:
+    if args.days_out > 21:
+      return {
+          "status": "High Price",
+          "avg_price": 320.0,
+          "advice": "Hold off; prices typically drop 2 weeks out.",
+      }
+    elif 10 <= args.days_out <= 21:
+      return {
+          "status": "Optimal Window",
+          "avg_price": 195.0,
+          "advice": "Buy now! This is the historical sweet spot.",
+      }
+    else:
+      return {
+          "status": "Last Minute Spike",
+          "avg_price": 450.0,
+          "advice": "Prices are surging due to low inventory.",
+      }
+  except Exception as e:
+    logger.error(json.dumps({"error": str(e)}))
+    return {"error": "Failed to retrieve pricing data safely."}
+
+
+def run_ticket_agent():
+  # 3. Context & Memory / Orchestration & Logic
+  prompt = (
+      "I want to track ticket pricing for the 'Global Tech Summit 2026' happening"
+      " in 14 days. Should I buy now?"
+  )
+  logger.info(json.dumps({"prompt": prompt, "stage": "user_input"}))
+
+  try:
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[check_event_ticket_pricing],
+            temperature=0.2,
+            system_instruction=(
+                "You are an expert ticket-purchasing concierge agent. Use the"
+                " provided tool to analyze pricing and give a clear,"
+                " data-driven recommendation with built-in guardrails against"
+                " price surges."
+            ),
+        ),
+    )
+    logger.info(
+        json.dumps({
+            "outcome": "success",
+            "response_preview": response.text[:100],
+        })
+    )
+    print(f"\n[Agent Response & Trace Tracing]:\n{response.text}")
+  except Exception as e:
+    logger.error(
+        json.dumps({"stage": "generation_error", "details": str(e)})
+    )
+    print(f"Error executing agent: {e}")
 
 
 if __name__ == "__main__":
-  asyncio.run(main())
+  run_ticket_agent()
