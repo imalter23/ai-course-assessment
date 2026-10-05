@@ -14,20 +14,21 @@ provider "google" {
 }
 
 resource "google_secret_manager_secret" "gemini_api_key_secret" {
-  secret_id = "gemini-api-key"
+  secret_id = "gemini-api-key-production"
   replication {
     automatic = true
   }
 }
 
 resource "google_cloud_run_v2_service" "agent_service" {
-  name     = "ticket-timing-agent"
+  name     = "ticket-timing-agent-service"
   location = "us-central1"
   ingress  = "INGRESS_TRAFFIC_ALL"
 
   template {
     containers {
       image = "gcr.io/ai-course-assessment-project/ticket-agent:latest"
+      
       env {
         name = "GEMINI_API_KEY"
         value_source {
