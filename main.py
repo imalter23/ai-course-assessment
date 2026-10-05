@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 import aiosqlite
+from guardrails import AgenticSafetyPolicy
 
 # OpenTelemetry Tracing
 from opentelemetry import trace
@@ -28,7 +29,6 @@ def redact_pii(text: str) -> str:
 
 client = genai.Client()
 
-# Detailed Domain Constitution and System Instructions
 AGENT_CONSTITUTION = (
     "SYSTEM CONSTITUTION & MANDATE:\n"
     "1. Role: You are an expert multi-agent event ticket pricing and timing concierge.\n"
@@ -126,7 +126,6 @@ class SupervisorRouterAgent:
         with tracer.start_as_current_span("supervisor_coordination_span") as span:
             span.set_attribute("user.prompt", prompt)
             
-            # Dynamic Model Routing Logic based on complexity
             if "complex" in prompt.lower() or "forecast" in prompt.lower() or "audit" in prompt.lower():
                 model_name = "gemini-2.5-pro"
                 route_type = "Deep Analysis Routing (Pro)"
@@ -138,15 +137,17 @@ class SupervisorRouterAgent:
             
             specialist_output = PricingSpecialistAgent.analyze(prompt, model_name)
             
-            # Structured Human-in-the-Loop Execution State Interruption
-            requires_hitl_pause = any(term in specialist_output for term in ["320", "450", "High Price", "Last Minute Spike"])
-            if requires_hitl_pause:
-                logger.info(json.dumps({"type": "hitl_state_suspension", "status": "workflow_paused"}))
-                # Explicitly return a suspended state payload rather than just appended text
+            # Execute Agentic Self-Evaluation Guardrail Policy
+            safety_verdict = AgenticSafetyPolicy.evaluate_output(specialist_output)
+            logger.info(json.dumps({"type": "agentic_safety_verdict", "verdict": safety_verdict}))
+            
+            if not safety_verdict["compliant"]:
+                specialist_output = f"[GUARDRAIL BREACH]: {safety_verdict['reason']}"
+            elif safety_verdict.get("requires_hitl"):
                 specialist_output = (
                     "[STATE: SUSPENDED_FOR_HUMAN_APPROVAL]\n"
                     f"{specialist_output}\n\n"
-                    "--> Workflow execution halted. Awaiting administrative override sign-off to proceed."
+                    f"--> Guardrail Policy Note: {safety_verdict['reason']}"
                 )
                 
             return model_name, specialist_output
