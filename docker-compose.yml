@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  ticket-agent:
+    build: .
+    container_name: ticket-timing-agent
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    secrets:
+      - gcp_secret_api_key
+
+secrets:
+  gcp_secret_api_key:
+    external: true
+    name: gemini-api-key
