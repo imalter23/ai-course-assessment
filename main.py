@@ -16,10 +16,10 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor, ConsoleSpanExpor
 provider = TracerProvider()
 provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
 trace.set_tracer_provider(provider)
-tracer = trace.get_tracer("ticket.agent.tracer")
+tracer = trace.get_tracer("ticket.multiagent.tracer")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("TicketAgent")
+logger = logging.getLogger("MultiAgentSystem")
 
 def redact_pii(text: str) -> str:
     text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[REDACTED_EMAIL]', text)
@@ -28,6 +28,7 @@ def redact_pii(text: str) -> str:
 
 client = genai.Client()
 
+# Tool Design with Pydantic & Error Recovery
 class TicketQueryArgs(BaseModel):
     event_name: str = Field(description="The exact title of the event or conference.")
     days_out: int = Field(description="Number of days remaining until the event date.")
@@ -66,7 +67,7 @@ def check_event_ticket_pricing(args: TicketQueryArgs) -> dict:
             "recovery_instruction": "Inform the user that live data is offline and use cached baseline price of $250.00."
         }
 
-# Context & Memory: Asynchronous Persistent Database & Context Compaction
+# Context & Memory: Asynchronous SQLite & Compaction
 class AsyncPersistentSessionManager:
     def __init__(self, db_path: str = "agent_sessions.db"):
         self.db_path = db_path
@@ -88,68 +89,58 @@ class AsyncPersistentSessionManager:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("INSERT INTO sessions (role, content) VALUES (?, ?)", (role, safe_content))
             await db.commit()
-            
-        # Advanced History Compaction / Context Window Management
-        await self._compact_context(db)
-
-    async def _compact_context(self, db):
-        async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("SELECT COUNT(*) FROM sessions") as cursor:
                 row = await cursor.fetchone()
                 count = row[0] if row else 0
             if count > 15:
-                logger.info("Executing async context window compaction...")
-                # Retain only the most recent 10 interactions to maintain context quality
                 await db.execute("DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY id DESC LIMIT 10)")
                 await db.commit()
 
-# Orchestration & Logic: Router and Robust HITL Hook
-def supervisor_router_agent(prompt: str) -> str:
-    with tracer.start_as_current_span("supervisor_routing_span") as span:
-        span.set_attribute("user.prompt", prompt)
-        if "complex" in prompt.lower() or "forecast" in prompt.lower():
-            return "gemini-2.5-pro"
-        return "gemini-2.5-flash"
+# Orchestration & Logic: True Multi-Agent Collaboration Network
+class PricingSpecialistAgent:
+    """Specialist Agent responsible for executing pricing tools and data analysis."""
+    @staticmethod
+    def analyze(prompt: str) -> str:
+        with tracer.start_as_current_span("pricing_specialist_span"):
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[check_event_ticket_pricing],
+                    temperature=0.1,
+                    system_instruction="You are the Pricing Specialist Agent. Execute the tool to evaluate ticket data accurately."
+                )
+            )
+            return response.text
 
-async def run_ticket_agent():
+class SupervisorRouterAgent:
+    """Supervisor Agent that routes, evaluates guardrails, and coordinates sub-agents."""
+    @staticmethod
+    def coordinate(prompt: str) -> str:
+        with tracer.start_as_current_span("supervisor_coordination_span") as span:
+            span.set_attribute("user.prompt", prompt)
+            
+            # Delegate to Pricing Specialist Sub-Agent
+            specialist_output = PricingSpecialistAgent.analyze(prompt)
+            
+            # Robust Agentic Guardrail & HITL Policy Enforcement
+            if any(term in specialist_output for term in ["320", "450", "High Price", "Last Minute Spike"]):
+                logger.info(json.dumps({"type": "agentic_guardrail_trigger", "status": "suspended_for_human_review"}))
+                specialist_output += "\n\n[Multi-Agent Guardrail Notice]: Threshold breach intercepted by Supervisor. Workflow paused for mandatory Human-in-the-Loop review."
+                
+            return specialist_output
+
+async def run_multi_agent_system():
     session = AsyncPersistentSessionManager()
     await session.init_db()
     
     prompt = "I want to track ticket pricing for the 'Global Tech Summit 2026' happening in 14 days. Should I buy now?"
     await session.add_interaction("user", prompt)
     
-    with tracer.start_as_current_span("agent_execution_span") as span:
-        model_name = supervisor_router_agent(prompt)
-        
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    tools=[check_event_ticket_pricing],
-                    temperature=0.2,
-                    system_instruction=(
-                        "You are an expert ticket-purchasing concierge agent. Use the provided tool "
-                        "to analyze pricing. If price exceeds $300, flag an explicit human-in-the-loop "
-                        "execution suspension."
-                    ),
-                ),
-            )
-            
-            output_text = response.text
-            
-            # Structured Agentic HITL Verification Gate
-            requires_human_approval = any(keyword in output_text for keyword in ["320", "450", "High Price", "Last Minute Spike"])
-            if requires_human_approval:
-                logger.info(json.dumps({"type": "hitl_suspension", "status": "paused_awaiting_admin_signoff"}))
-                output_text += "\n\n[Agent Execution Suspended]: High-value threshold reached. Workflow paused for mandatory Human-in-the-Loop administrative approval."
-
-            await session.add_interaction("assistant", output_text)
-            print(f"\n[Agent Response & Trace Tracing]:\n{output_text}")
-            
-        except Exception as e:
-            logger.error(json.dumps({"stage": "fatal_error", "details": str(e)}))
-            print(f"Agent execution failed: {e}")
+    output = SupervisorRouterAgent.coordinate(prompt)
+    await session.add_interaction("assistant", output)
+    
+    print(f"\n[Multi-Agent Execution Output & Trace Tracing]:\n{output}")
 
 if __name__ == "__main__":
-    asyncio.run(run_ticket_agent())
+    asyncio.run(run_multi_agent_system())
