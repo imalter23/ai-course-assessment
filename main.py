@@ -155,7 +155,7 @@ class SupervisorRouterAgent:
                 model_name = "gemini-2.5-pro"
                 route_type = "Deep Analysis Routing (Pro)"
             else:
-                model_name = "gemini-2.5-flash"
+                model_name = "gemini-3.5-flash"
                 route_type = "Standard Concierge Routing (Flash)"
                 
             logger.info(json.dumps({"type": "dynamic_routing", "route": route_type, "model": model_name}))
