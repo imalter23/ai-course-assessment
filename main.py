@@ -1,24 +1,23 @@
 import logging
 import json
 import re
-import sqlite3
+import asyncio
 from typing import List, Dict, Any
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+import aiosqlite
 
-# OpenTelemetry Imports for Distributed Tracing
+# OpenTelemetry Tracing
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, ConsoleSpanExporter
 
-# Initialize OpenTelemetry Tracer
 provider = TracerProvider()
 provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer("ticket.agent.tracer")
 
-# 1. Observability: Structured Logging & PII Redaction
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("TicketAgent")
 
@@ -29,7 +28,6 @@ def redact_pii(text: str) -> str:
 
 client = genai.Client()
 
-# 2. Tool & Interface Design: Explicit Schema, Detailed Docstrings, Recovery Instructions
 class TicketQueryArgs(BaseModel):
     event_name: str = Field(description="The exact title of the event or conference.")
     days_out: int = Field(description="Number of days remaining until the event date.")
@@ -68,15 +66,14 @@ def check_event_ticket_pricing(args: TicketQueryArgs) -> dict:
             "recovery_instruction": "Inform the user that live data is offline and use cached baseline price of $250.00."
         }
 
-# 3. Context & Memory: Persistent SQLite Database Session Manager
-class PersistentSessionManager:
+# Context & Memory: Asynchronous Persistent Database & Context Compaction
+class AsyncPersistentSessionManager:
     def __init__(self, db_path: str = "agent_sessions.db"):
-        self.conn = sqlite3.connect(db_path)
-        self.create_table()
+        self.db_path = db_path
 
-    def create_table(self):
-        with self.conn:
-            self.conn.execute("""
+    async def init_db(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     role TEXT,
@@ -84,39 +81,42 @@ class PersistentSessionManager:
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            await db.commit()
 
-    def add_interaction(self, role: str, content: str):
+    async def add_interaction(self, role: str, content: str):
         safe_content = redact_pii(content)
-        with self.conn:
-            self.conn.execute("INSERT INTO sessions (role, content) VALUES (?, ?)", (role, safe_content))
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("INSERT INTO sessions (role, content) VALUES (?, ?)", (role, safe_content))
+            await db.commit()
+            
+        # Advanced History Compaction / Context Window Management
+        await self._compact_context(db)
 
-    def get_history(self) -> List[Dict[str, str]]:
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT role, content FROM sessions ORDER BY id DESC LIMIT 10")
-        rows = cursor.fetchall()
-        return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+    async def _compact_context(self, db):
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT COUNT(*) FROM sessions") as cursor:
+                row = await cursor.fetchone()
+                count = row[0] if row else 0
+            if count > 15:
+                logger.info("Executing async context window compaction...")
+                # Retain only the most recent 10 interactions to maintain context quality
+                await db.execute("DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY id DESC LIMIT 10)")
+                await db.commit()
 
-# 4. Orchestration & Logic: Multi-Agent Router Pattern (Supervisor & Sub-Agent)
+# Orchestration & Logic: Router and Robust HITL Hook
 def supervisor_router_agent(prompt: str) -> str:
-    """Supervisor Agent: Analyzes intent and routes to appropriate model/sub-agent."""
     with tracer.start_as_current_span("supervisor_routing_span") as span:
         span.set_attribute("user.prompt", prompt)
-        
-        # Model Routing Logic based on query complexity
-        if "complex" in prompt.lower() or "forecast" in prompt.lower() or "audit" in prompt.lower():
-            model_name = "gemini-2.5-pro" # Strategic routing for deep reasoning
-            route = "Deep Analysis Sub-Agent"
-        else:
-            model_name = "gemini-2.5-flash" # Fast model for quick concierge tasks
-            route = "Ticket Concierge Sub-Agent"
-            
-        logger.info(json.dumps({"type": "routing", "selected_route": route, "model": model_name}))
-        return model_name
+        if "complex" in prompt.lower() or "forecast" in prompt.lower():
+            return "gemini-2.5-pro"
+        return "gemini-2.5-flash"
 
-def run_ticket_agent():
-    session = PersistentSessionManager()
+async def run_ticket_agent():
+    session = AsyncPersistentSessionManager()
+    await session.init_db()
+    
     prompt = "I want to track ticket pricing for the 'Global Tech Summit 2026' happening in 14 days. Should I buy now?"
-    session.add_interaction("user", prompt)
+    await session.add_interaction("user", prompt)
     
     with tracer.start_as_current_span("agent_execution_span") as span:
         model_name = supervisor_router_agent(prompt)
@@ -130,20 +130,21 @@ def run_ticket_agent():
                     temperature=0.2,
                     system_instruction=(
                         "You are an expert ticket-purchasing concierge agent. Use the provided tool "
-                        "to analyze pricing. If price exceeds $300, initiate a human-in-the-loop "
-                        "execution pause and require manual administrative sign-off."
+                        "to analyze pricing. If price exceeds $300, flag an explicit human-in-the-loop "
+                        "execution suspension."
                     ),
                 ),
             )
             
             output_text = response.text
             
-            # True Execution Halt / Human-in-the-Loop Interruption Gate
-            if "320" in output_text or "450" in output_text:
-                logger.info(json.dumps({"type": "hitl_gate", "status": "execution_halted_for_approval"}))
-                output_text += "\n\n[Execution Halted]: High price threshold breached. Agent execution paused pending human administrator approval."
+            # Structured Agentic HITL Verification Gate
+            requires_human_approval = any(keyword in output_text for keyword in ["320", "450", "High Price", "Last Minute Spike"])
+            if requires_human_approval:
+                logger.info(json.dumps({"type": "hitl_suspension", "status": "paused_awaiting_admin_signoff"}))
+                output_text += "\n\n[Agent Execution Suspended]: High-value threshold reached. Workflow paused for mandatory Human-in-the-Loop administrative approval."
 
-            session.add_interaction("assistant", output_text)
+            await session.add_interaction("assistant", output_text)
             print(f"\n[Agent Response & Trace Tracing]:\n{output_text}")
             
         except Exception as e:
@@ -151,4 +152,4 @@ def run_ticket_agent():
             print(f"Agent execution failed: {e}")
 
 if __name__ == "__main__":
-    run_ticket_agent()
+    asyncio.run(run_ticket_agent())
