@@ -28,7 +28,17 @@ def redact_pii(text: str) -> str:
 
 client = genai.Client()
 
-# Tool Design with Pydantic & Error Recovery
+# Detailed Domain Constitution and System Instructions
+AGENT_CONSTITUTION = (
+    "SYSTEM CONSTITUTION & MANDATE:\n"
+    "1. Role: You are an expert multi-agent event ticket pricing and timing concierge.\n"
+    "2. Domain Knowledge: You understand historical ticket volatility, optimal purchase windows (typically 10-21 days out), "
+    "surge pricing risks, and inventory scarcity indices.\n"
+    "3. Constraints: Never bypass price threshold safety gates. If an item exceeds $300, you must trigger an explicit "
+    "execution suspension for manual human confirmation.\n"
+    "4. Reliability: Always provide clear, data-driven recommendations using verified tool metrics."
+)
+
 class TicketQueryArgs(BaseModel):
     event_name: str = Field(description="The exact title of the event or conference.")
     days_out: int = Field(description="Number of days remaining until the event date.")
@@ -67,7 +77,6 @@ def check_event_ticket_pricing(args: TicketQueryArgs) -> dict:
             "recovery_instruction": "Inform the user that live data is offline and use cached baseline price of $250.00."
         }
 
-# Context & Memory: Asynchronous SQLite & Compaction
 class AsyncPersistentSessionManager:
     def __init__(self, db_path: str = "agent_sessions.db"):
         self.db_path = db_path
@@ -96,39 +105,51 @@ class AsyncPersistentSessionManager:
                 await db.execute("DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY id DESC LIMIT 10)")
                 await db.commit()
 
-# Orchestration & Logic: True Multi-Agent Collaboration Network
 class PricingSpecialistAgent:
-    """Specialist Agent responsible for executing pricing tools and data analysis."""
     @staticmethod
-    def analyze(prompt: str) -> str:
+    def analyze(prompt: str, model_name: str) -> str:
         with tracer.start_as_current_span("pricing_specialist_span"):
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     tools=[check_event_ticket_pricing],
                     temperature=0.1,
-                    system_instruction="You are the Pricing Specialist Agent. Execute the tool to evaluate ticket data accurately."
+                    system_instruction=AGENT_CONSTITUTION + "\nRole: You are the Pricing Specialist Agent."
                 )
             )
             return response.text
 
 class SupervisorRouterAgent:
-    """Supervisor Agent that routes, evaluates guardrails, and coordinates sub-agents."""
     @staticmethod
-    def coordinate(prompt: str) -> str:
+    def coordinate(prompt: str) -> tuple[str, str]:
         with tracer.start_as_current_span("supervisor_coordination_span") as span:
             span.set_attribute("user.prompt", prompt)
             
-            # Delegate to Pricing Specialist Sub-Agent
-            specialist_output = PricingSpecialistAgent.analyze(prompt)
-            
-            # Robust Agentic Guardrail & HITL Policy Enforcement
-            if any(term in specialist_output for term in ["320", "450", "High Price", "Last Minute Spike"]):
-                logger.info(json.dumps({"type": "agentic_guardrail_trigger", "status": "suspended_for_human_review"}))
-                specialist_output += "\n\n[Multi-Agent Guardrail Notice]: Threshold breach intercepted by Supervisor. Workflow paused for mandatory Human-in-the-Loop review."
+            # Dynamic Model Routing Logic based on complexity
+            if "complex" in prompt.lower() or "forecast" in prompt.lower() or "audit" in prompt.lower():
+                model_name = "gemini-2.5-pro"
+                route_type = "Deep Analysis Routing (Pro)"
+            else:
+                model_name = "gemini-2.5-flash"
+                route_type = "Standard Concierge Routing (Flash)"
                 
-            return specialist_output
+            logger.info(json.dumps({"type": "dynamic_routing", "route": route_type, "model": model_name}))
+            
+            specialist_output = PricingSpecialistAgent.analyze(prompt, model_name)
+            
+            # Structured Human-in-the-Loop Execution State Interruption
+            requires_hitl_pause = any(term in specialist_output for term in ["320", "450", "High Price", "Last Minute Spike"])
+            if requires_hitl_pause:
+                logger.info(json.dumps({"type": "hitl_state_suspension", "status": "workflow_paused"}))
+                # Explicitly return a suspended state payload rather than just appended text
+                specialist_output = (
+                    "[STATE: SUSPENDED_FOR_HUMAN_APPROVAL]\n"
+                    f"{specialist_output}\n\n"
+                    "--> Workflow execution halted. Awaiting administrative override sign-off to proceed."
+                )
+                
+            return model_name, specialist_output
 
 async def run_multi_agent_system():
     session = AsyncPersistentSessionManager()
@@ -137,10 +158,11 @@ async def run_multi_agent_system():
     prompt = "I want to track ticket pricing for the 'Global Tech Summit 2026' happening in 14 days. Should I buy now?"
     await session.add_interaction("user", prompt)
     
-    output = SupervisorRouterAgent.coordinate(prompt)
+    model_used, output = SupervisorRouterAgent.coordinate(prompt)
     await session.add_interaction("assistant", output)
     
-    print(f"\n[Multi-Agent Execution Output & Trace Tracing]:\n{output}")
+    print(f"\n[Model Used: {model_used}]")
+    print(f"[Multi-Agent Execution Output]:\n{output}")
 
 if __name__ == "__main__":
     asyncio.run(run_multi_agent_system())
